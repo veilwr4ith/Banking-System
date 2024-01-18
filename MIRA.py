@@ -1,4 +1,4 @@
-
+#!/usr/bin/env python3
 
 about = """
 ---------------------------------------------------------------
@@ -11,12 +11,13 @@ Project: MIRA - CyberGuard Innovation's CLI Password Manager
 GitHub Repository: https://github.com/saphiraaa/MIRA
 License: MIT License
 
-Version: 2.12.9
-Release Date: 2024-01-04
+Version: 2.12.10
+Release Date: 2024-01-15
                                                             
 New Features:                                                 
-- Debit/Credit Card PINs are now acceptable                   
-- API Keys are now acceptable                                 
+- Debit/Credit Card PINs are now supported 
+- SSH Keys are now supported
+- Password Strength Checker
 - Bug fixes and optimizations                                 
 - Password Expiration for Card PINs (2mnths)                   
 ---------------------------------------------------------------
@@ -82,7 +83,7 @@ wolf = r'''
                             Y8o        ,d8P'              ba                     / /  / // // _, _/ ___ |
                        ooood8888888P"""'                  P'                    /_/  /_/___/_/ |_/_/  |_|
                     ,od                                  8                       CyberGuard Innovations
-                 ,dP     o88o                           o'                               2.12.9
+                 ,dP     o88o                           o'                               2.12.10
                 ,dP          8                          8
                ,d'   oo       8                       ,8
                $    d$"8      8           Y    Y  o   8
@@ -97,6 +98,8 @@ wolf = r'''
 '''
 
 from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.backends import default_backend
 import os
 import getpass
 from argon2 import PasswordHasher
@@ -115,6 +118,9 @@ import random
 import json
 import platform
 import sys
+import paramiko
+import io
+import validators
 
 def clear_terminal():
     if os.name == "posix":
@@ -201,6 +207,19 @@ def get_current_datetime():
 
     return f"Current Time: {time_str}\nDate: {date_str}"
 
+def loading_animation(duration=20):
+    patterns = ["[    ]", "[=   ]", "[==  ]", "[=== ]", "[ ===]", "[  ==]", "[   =]"]
+    num_patterns = len(patterns)
+    start_time = time.time()
+
+    while time.time() - start_time < duration:
+        for i in range(num_patterns):
+            sys.stdout.write("\r" + colored("[*] Starting MIRA Password Manager" + patterns[i % num_patterns], "blue"))
+            sys.stdout.flush()
+            time.sleep(0.2)
+
+    sys.stdout.flush()
+
 class PasswordManager:
     MAX_LOGIN_ATTEMPTS = 4 
     LOCKOUT_DURATION_SECONDS = 300
@@ -212,6 +231,8 @@ class PasswordManager:
         PASSFILE = os.environ.get('PASSFILE', '/etc/.pass')
         API = os.environ.get('API', '/etc/.api')
         CARD_PIN_FILE = os.environ.get('CARD_PIN_FILE', '/etc/.card')
+        RSA = os.environ.get('RSA', '/etc/.rsa')
+        SSH = os.environ.get('SSH', '/etc/.ssh')
     elif os.name == "nt":
         program_files_dir = os.environ.get('ProgramFiles', 'C:\\Program Files')
         app_folder_name = 'Mira'
@@ -223,6 +244,8 @@ class PasswordManager:
         PASSFILE = os.path.join(app_folder_path, 'pass')
         API = os.path.join(app_folder_path, 'api')
         CARD_PIN_FILE = os.path.join(app_folder_path, 'card')
+        RSA = os.path.join(app_folder_path, 'rsa')
+        SSH = os.environ.get('SSH', '/etc/.ssh')
 
     def __init__(self):
         """--------Initializers--------"""
@@ -277,12 +300,6 @@ class PasswordManager:
                 '8': ['b', 'ß', 'ь'],
                 '9': ['g', 'ğ', 'ĝ'],
             }
-
-    def clear_terminal(self):
-        if os.name == "posix":
-            os.system("clear")
-        elif os.name == "nt":
-            os.system("cls")
 
     def save_lockout_time(self):
         """
@@ -345,7 +362,7 @@ class PasswordManager:
                     phrase = input(colored("[*] Enter a custom phrase: ", "yellow"))
                     if not phrase:
                         print(colored("[**] No phrase provided!! using default phrase", "magenta"))
-                        phrase = 'saphirathebestpasswordmanager'
+                        phrase = 'mirathebestpasswordmanager'
                     else:
                         phrase = str(phrase)
                     password = self.generate_password_from_phrase(phrase)
@@ -358,7 +375,7 @@ class PasswordManager:
                     phrase = input(colored("[*] Enter a custom phrase: ", "yellow"))
                     if not phrase:
                         print(colored("[**] No phrase provided, using default phrase!!", "magenta"))
-                        phrase = 'saphirathebestpasswordmanager'
+                        phrase = 'mirathebestpasswordmanager'
                     else:
                         phrase = str(phrase)
                     password = self.generate_combined_password(length, phrase)
@@ -374,7 +391,7 @@ class PasswordManager:
                     pattern = input(colored("[*] Enter the password pattern: ", "yellow"))
                     if not pattern:
                         pattern = 'uuuullaaddsssslllaaalssdddaaaaasasasldld'
-                        print(colored("[**] No pattern provided!! (default: {pattern})", "magenta"))
+                        print(colored(f"[**] No pattern provided!! (default: {pattern})", "magenta"))
                     else:
                         pattern = str(pattern)
                     password = self.generate_pattern_password(pattern)
@@ -384,7 +401,7 @@ class PasswordManager:
                         length = int(input(colored("[-] Enter the desired password length: ", "yellow")))
                     except ValueError:
                         length = 30
-                        print(colored("[**] No length provided!! (default: {length}).", "magenta"))
+                        print(colored(f"[**] No length provided!! (default: {length}).", "magenta"))
                     password = self.generate_random_password(length)
 
                 print(colored(f"[+] Generated Password: {password}", "green"))
@@ -581,7 +598,6 @@ class PasswordManager:
             uppercase=3,
             numbers=3,
             special=4,
-            nonletters=4,
         )
         result = policy.test(password)
         if result:
@@ -605,7 +621,7 @@ class PasswordManager:
             length=10,
             uppercase=1,
             numbers=1,
-            special=3,
+            special=1,
         )
         result = policy.test(password)
         
@@ -755,7 +771,7 @@ class PasswordManager:
             try:
                 self.ph.verify(user_data['master_password'], entered_password + user_data['salt'])
             except VerifyMismatchError:
-                print(colored("[-] Invalid Login credentials!!", "red"))
+                print(colored("[-] Invalid Login credentials. Login failed!", "red"))
                 if self.increment_failed_attempts():
                     return  
                 else:
@@ -781,7 +797,7 @@ class PasswordManager:
                     try:
                         self.ph.verify(user_data['2fa_secret_key'], key)
                     except VerifyMismatchError:
-                        print(colored("[-] Invalid Secret Key!!", "red"))
+                        print(colored("[-] Invalid Secret Key. Login failed", "red"))
                         return
                     code = getpass.getpass(colored("[*] 6-Digit Code (2FA): ", "yellow"))
                     if not self.verify_2fa(key, code):
@@ -799,12 +815,52 @@ class PasswordManager:
                 self.main_menu()
 
             else:
-                print(colored("[-] Invalid Login credentials!!", "red"))
+                print(colored("[-] Invalid Login credentials. Login failed!", "red"))
                 if self.increment_failed_attempts():
                     clear_terminal()
                     return  
                 else:
                     return
+
+    def show_ssh_key(self):
+        """
+        Displays SSH key information based on the specified platform or all platforms. Reads SSH key data from the SSH file, formats and prints the relevant information. Handles FileNotFoundError and prints an error message if no SSH keys are saved.
+        """
+        try:
+            with open(self.SSH, 'r') as file:
+                data = json.load(file)
+
+            username = input(colored("[*] Username: ", "yellow")).lower()
+            key_status = []
+
+            for entry in data:
+                if entry['username'] == username or username.lower() == 'all':
+                    added_at = datetime.strptime(entry['added_at'], "%Y-%m-%d %H:%M:%S").strftime("%Y-%m-%d %H:%M:%S")
+
+                    key_status.append({
+                        'username': entry['username'],
+                        'key_name': entry['key_name'],
+                        'added_at': added_at
+                    })
+
+            if key_status:
+                if username == 'all' or not username:
+                    print(colored("[+] All Available SSH Keys:", "green"))
+                    print(colored("\nUsername".ljust(31) + "SSH Key Name".ljust(30) + "Added At", "cyan"))
+                    print(colored("--------------------".ljust(30) + "--------------------".ljust(30) + "-------------------", "cyan"))
+                    for user_status in key_status:
+                        print(f"{colored(user_status['username'].ljust(30), 'cyan')}{colored(user_status['key_name'].ljust(30), 'cyan')}{colored(user_status['added_at'].ljust(25), 'cyan')}")
+                else:
+                    print(colored(f"[+] Available SSH Keys for {username}:", "green"))
+                    print(colored("\nSSH Key Name".ljust(31) + "Added At", "cyan"))
+                    print(colored("--------------------".ljust(30) + "-------------------", "cyan"))
+                    for user_status in key_status:
+                        print(f"{colored(user_status['key_name'].ljust(30), 'cyan')}{colored(user_status['added_at'].ljust(25), 'cyan')}")
+            else:
+                print(colored("[-] No matching entries found for the specified Username.", "red"))
+
+        except FileNotFoundError:
+            print(colored("[-] No SSH Key saved. Show SSH Keys failed!", "red"))
 
     def show_api_key(self):
         """
@@ -844,7 +900,7 @@ class PasswordManager:
                 print(colored("[-] No matching entries found for the specified Platform.", "red"))
 
         except FileNotFoundError:
-            print(colored("[-] No API Key saved. Show expiry status failed!", "red"))
+            print(colored("[-] No API Key saved. Show API Key failed!", "red"))
     
     def show_pin_expiry_status(self):
         """
@@ -889,10 +945,66 @@ class PasswordManager:
                     for user_status in card_status:
                         print(f"{colored(user_status['card_number'].ljust(30), 'cyan')}{user_status['status'].ljust(33)}{colored(user_status['added_at'].ljust(25), 'cyan')}{colored(user_status['expiry_at'].ljust(24), 'cyan')} {colored(user_status['remaining_time'].ljust(30), 'cyan')}")
             else:
-                print(colored("[-] No matching entries found for the specified card type.", "red"))
+                print(colored("[-] No matching entries found for the specified Card Type.", "red"))
 
         except FileNotFoundError:
             print(colored("[-] No PIN saved. Show expiry status failed!", "red"))
+
+    def show_passwd_strength(self):
+        try:
+            with open(self.PASSFILE, 'r') as file:
+                data = json.load(file)
+
+            platform_url = input(colored("[*] URL of the Platform: ", "yellow"))
+            passwd_strength = []
+
+            for entry in data:
+                if entry['website'] == platform_url or platform_url.lower() == 'all':
+                    password = self.decrypt_password(entry['password'])
+                    strength = self.check_password_strngth(password)
+
+                    passwd_strength.append({
+                        'website': entry['website'],
+                        'username': entry['username'],
+                        'strength': strength
+                    })
+
+            if passwd_strength:
+                if platform_url == 'all' or not platform_url:
+                    print(colored("[+] All Available Users:", "green"))
+                    print(colored("\nPlatform".ljust(31) + "Username".ljust(30) + "Strength", "cyan"))
+                    print(colored("--------------------".ljust(30) + "--------------------".ljust(30) + "----------", "cyan"))
+                    for user_status in passwd_strength:
+                        print(f"{colored(user_status['website'].ljust(30), 'cyan')}{colored(user_status['username'].ljust(30), 'cyan')}{colored(user_status['strength'], 'cyan')}")
+                else:
+                    print(colored(f"[+] Available Users for {platform_url}:", "green"))
+                    print(colored("\nUsername".ljust(31) + "Strength", "cyan"))
+                    print(colored("--------------------".ljust(30) + "----------", "cyan"))
+                    
+                    for user_status in passwd_strength:
+                        print(f"{colored(user_status['username'].ljust(30), 'cyan')}{user_status['strength']}")
+            else:
+                print(colored("[-] No matching entries found for the specified Platform.", "red"))
+
+        except FileNotFoundError:
+            print(colored("[-] No passwords saved. Show password strength failed!", "red"))
+
+    def check_password_strngth(self, password):
+        is_length_valid = len(password) > 10
+        has_uppercase = any(char.isupper() for char in password)
+        has_lowercase = any(char.islower() for char in password)
+        has_digit = any(char.isdigit() for char in password)
+        has_special_char = any(char.isalnum() == False for char in password)
+
+        conditions_met = [is_length_valid, has_uppercase, has_lowercase, has_digit, has_special_char]
+        num_conditions_met = sum(conditions_met)
+
+        if num_conditions_met == 5:
+            return colored("Strong", "green")
+        elif num_conditions_met >= 3:
+            return colored("Moderate", "yellow")
+        else:
+            return colored("Weak", "red")
 
     def show_expiry_status(self):
         """
@@ -934,7 +1046,7 @@ class PasswordManager:
                     for user_status in usernames_status:
                         print(f"{colored(user_status['username'].ljust(30), 'cyan')}{user_status['status'].ljust(33)}{colored(user_status['added_at'].ljust(25), 'cyan')}{colored(user_status['expiry_at'].ljust(24), 'cyan')} {colored(user_status['remaining_time'].ljust(30), 'cyan')}")
             else:
-                print(colored("[-] No matching entries found for the specified platform.", "red"))
+                print(colored("[-] No matching entries found for the specified Platform.", "red"))
 
         except FileNotFoundError:
             print(colored("[-] No passwords saved. Show expiry status failed!", "red"))
@@ -975,44 +1087,54 @@ class PasswordManager:
 
             elif choice == 'add_platform_passwd':
                 website = input(colored("[*] Platform: ", "yellow"))
-                if not website.startswith('http://') and not website.startswith('https://'):
-                    print(colored("[-] Provide a platform in URL form please.", "red"))
+                if not validators.url(website):
+                    print(colored("[-] The Platform you've entered is Invalid! Please make sure that it's in URL form.", "red"))
                     continue
-
+                email_address = input(colored("[*] Email Address: ", "yellow"))
+                if not validators.email(email_address):
+                    print(colored("[-] The Email you've entered is Invalid!", "red"))
+                    continue
                 username = input(colored("[*] Username: ", "yellow"))
                 password = getpass.getpass(colored("[*] Password: ", "yellow"))
                 re_enter = getpass.getpass(colored("[*] Re-Enter Password: ", "yellow"))
                 if re_enter != password:
                     print(colored("[-] Password did not match! QUITTING!", "red"))
                 else:
-                    self.add_password(website, username, password)
+                    self.add_password(website, email_address, username, password)
                     self.notify_expiry()
                     self.notify_pin_expiry()
 
             elif choice == 'get_platform_passwd':
                 website = input(colored("[*] Platform: ", "yellow"))
-                if not website.startswith('http://') and not website.startswith('https://'):
-                    print(colored("[-] Provide a platform in URL form please.", "red"))
+                if not validators.url(website):
+                    print(colored("[-] The Platform you've entered is Invalid! Please make sure that it's in URL form.", "red"))
+                    continue
+                email_address = input(colored("[*] Email Address: ", "yellow"))
+                if not validators.email(email_address):
+                    print(colored("[-] The Email you've entered is Invalid!", "red"))
                     continue
                 username = input(colored("[*] Username: ", "yellow"))
-                decrypted_password = self.get_password(website, username)
+                decrypted_password = self.get_password(website, email_address, username)
                 
                 try:
                     with open(self.PASSFILE, 'r') as file:
                         data = json.load(file)
 
                     if website not in [entry['website'] for entry in data]:
-                        print(colored("[-] This platform is not available on your vault.", "red"))
+                        print(colored(f"[-] This platform {website} is not available on your vault.", "red"))
+                        continue
+                    elif email_address not in [entry['emsil_address'] for entry in data]:
+                        print(colored(f"[-] This emsil {email_address} is not available on your vault.", "red"))
                         continue
                     elif username not in [entry['username'] for entry in data]:
-                        print(colored("[-] This username doesn't exist for that platform.", "red"))
+                        print(colored(f"[-] This username {username} doesn't exist for that platform.", "red"))
                         continue
 
                     for entry in data:
-                        if entry['website'] == website and entry['username'] == username and 'expiry_at' in entry and entry['expiry_at']:
+                        if entry['website'] == website and entry['email_address'] == email_address and entry['username'] == username and 'expiry_at' in entry and entry['expiry_at']:
                             expiry_date = datetime.strptime(entry['expiry_at'], "%Y-%m-%d %H:%M:%S")
                             if datetime.now() > expiry_date:
-                                response = input(colored("[*] Password has expired. Do you want to update the password or delete the website? (U/D): ", "yellow")).lower()
+                                response = input(colored("[*] Password has expired. Do you want to update the password or delete the account for this platform? (U/D): ", "yellow")).lower()
                                 if response == 'u':
                                     new_password = getpass.getpass(colored("[*] New Password: ", "yellow"))
                                     re_enter = getpass.getpass(colored("[*] Re-Enter New Password: ", "yellow"))
@@ -1052,7 +1174,7 @@ class PasswordManager:
                                         print(colored("[-] Abort.", "red"))
                                         continue
                                     elif caution == 'y':
-                                        data = [e for e in data if not (e['website'] == website and e['username'] == username)]
+                                        data = [e for e in data if not (e['website'] == website and e['email_address'] == email_address and e['username'] == username)]
                                         with open(self.PASSFILE, 'w') as file:
                                             json.dump(data, file, indent=4)
 
@@ -1065,7 +1187,7 @@ class PasswordManager:
                                     print(colored("[-] Password not found! Did you save the password?", "red"))
 
                 except FileNotFoundError:
-                    print(colored("[-] No passwords has been saved yet!", "red"))
+                    print(colored("[-] No passwords has been saved yet. Retrieve passwors failed!", "red"))
 
             elif choice == 'chmast':
                 self.change_master_password()
@@ -1097,20 +1219,154 @@ class PasswordManager:
                 self.notify_expiry()
                 self.notify_pin_expiry()
 
+            elif choice == 'add_ssh_key':
+                username = input(colored("[*] Username: ", "yellow"))
+                if not username:
+                    print(colored("[-] No username provided! QUITTING!", "red"))
+                    continue
+                key_name = input(colored("[*] Key Name: ", "yellow"))
+                if not key_name:
+                    print(colored("[-] No key name provided! QUITTING!", "red"))
+                    continue
+
+                print(colored("[*] Enter the Private Key (press Ctrl+D on a new line to finish):", "yellow"))
+                private_key_lines = []
+                try:
+                    while True:
+                        line = input()
+                        private_key_lines.append(line)
+                except EOFError:
+                    pass
+
+                print(colored("[*] Enter the Public Key (press Ctrl+D on a new line to finish):", "yellow"))
+                public_key_lines = []
+                try:
+                    while True:
+                        line = input()
+                        public_key_lines.append(line)
+                except EOFError:
+                    pass
+
+                private_key = '\n'.join(private_key_lines)
+                public_key = '\n'.join(public_key_lines)
+
+                is_password_protected = False
+                passphrase = None
+
+                try:
+                    key = paramiko.RSAKey(file_obj=io.StringIO(private_key))
+                    self.add_ssh_key(username, key_name, private_key, public_key)
+                    self.notify_expiry()
+                    self.notify_pin_expiry()
+                except paramiko.ssh_exception.PasswordRequiredException:
+                    is_password_protected = True
+
+                    try:
+                        if is_password_protected:
+                            print(colored("[*] The private key is Password-Protected!", "magenta"))
+                            passphrase = getpass.getpass(colored("[*] Private key passphrase: ", "yellow"))
+                            re_enter = getpass.getpass(colored("[*] Re-Enter passphrase: ", "yellow"))
+                            if re_enter != passphrase:
+                                print(colored("[-] Passphrase did not match! QUITTING!"))
+                            else:
+                                key = paramiko.RSAKey(file_obj=io.StringIO(private_key), password=passphrase)
+                        else:
+                            key = paramiko.RSAKey(file_obj=io.StringIO(private_key))
+                    except Exception as e:
+                        print(colored(f"[-] Error: {e}", "red"))
+                    else:
+                        self.add_ssh_key(username, key_name, private_key, public_key, passphrase)
+                        self.notify_expiry()
+                        self.notify_pin_expiry()
+
+            elif choice == 'get_ssh_key':
+                username = input(colored("[*] Username: ", "yellow"))
+                if not username:
+                    print(colored("[-] No username provided! QUITTING!", "red"))
+                    continue
+                key_name = input(colored("[*] Key Name: ", "yellow"))
+                if not key_name:
+                    print(colored("[-] No key name provided! QUITTING!", "red"))
+                    continue
+        
+                try:
+                    with open(self.SSH, 'r') as file:
+                        data = json.load(file)
+
+                    if username not in [entry['username'] for entry in data]:
+                        print(colored(f"[-] This username {username} is not available in your vault.", "red"))
+                    elif key_name not in [entry['key_name'] for entry in data]:
+                        print(colored(f"[-] The key name {key_name} doesn't exist for that username", "red"))
+                    else:
+                        private_key_lines = self.get_private_ssh_key(username, key_name)
+                        if private_key_lines is not None:
+                            print(colored("[*] Private Key:", "yellow"))
+                            formatted_private_key = ''.join(private_key_lines)
+                            print(colored(formatted_private_key, "green"))
+                        else:
+                            print(colored("[-] Private Key not found!", "red"))
+        
+                        public_key_lines = self.get_public_ssh_key(username, key_name)
+                        if public_key_lines is not None:
+                            print(colored("\n[*] Public Key:", "yellow"))
+                            formatted_public_key = ''.join(public_key_lines)
+                            print(colored(formatted_public_key, "green"))
+                        else:
+                            print(colored("[-] Public Key not found!", "red"))
+
+                        decrypted_passphrase = self.get_passphrase_private_ssh_key(username, key_name)
+                        if decrypted_passphrase is not None:
+                            print(colored(f"\n[+] Passphrase: {colored(decrypted_passphrase, 'green')}", "yellow"))
+                        else:
+                            print(colored("[-] Passphrase not found!", "red"))
+                except FileNotFoundError:
+                    print(colored("[-] No SSH Key have been saved. Retrieve SSH Key failed!", "red"))
+
+            elif choice == 'del_ssh_key':
+                self.delete_ssh_key()
+                self.notify_expiry()
+                self.notify_pin_expiry()
+
             elif choice == 'ch_platform_passwd':
                 website = input(colored("[*] Platform: ", "yellow"))
-                if not website.startswith('http://') and not website.startswith('https://'):
-                    print(colored("[-] Provide a platform in URL form please.", "red"))
+                if not validators.url(website):
+                    print(colored("[-] The Platform you've entered is Invalid! Please make sure that it's in URL form.", "red"))
+                    continue
+                email_address = input(colored("[*] Email Address: ", "yellow"))
+                if not validators.email(email_address):
+                    print(colored("[-] The Email you've entered is Invalid!", "red"))
                     continue
                 username = input(colored("[+] Username: ", "yellow"))
-                self.change_password(website, username)
+                if not username:
+                    print(colored("[-] No username provided! QUITTING!", "red"))
+                    continue
+                self.change_password(website, email_address, username)
                 self.notify_expiry()
                 self.notify_pin_expiry()
 
             elif choice == 'ch_card_pin':
                 card_type = input(colored("[*] Card Type: ", "yellow"))
+                if card_type != 'debit' and card_type != 'credit':
+                    print(colored("[-] Please specify if Debit or Credit.", "red"))
+                    continue
                 card_number = input(colored("[*] Card Number: ", "yellow"))
+                if not card_number:
+                    print(colored("[-] No card number provided! QUITTING!", "red"))
+                    continue
                 self.change_pin(card_type, card_number)
+                self.notify_expiry()
+                self.notify_pin_expiry()
+
+            elif choice == 'ch_ssh_key':
+                username = input(colored("[*] Username: ", "yellow"))
+                if not username:
+                    print(colored("[-] No username provided! QUITTING!", "red"))
+                    continue
+                key_name = input(colored("[*] Key Name: ", "yellow"))
+                if not key_name:
+                    print(colored("[-] No key name provided! QUITTING!", "red"))
+                    continue
+                self.change_ssh_key(username, key_name)
                 self.notify_expiry()
                 self.notify_pin_expiry()
 
@@ -1137,6 +1393,16 @@ class PasswordManager:
 
             elif choice == 'show_pin_exp':
                 self.show_pin_expiry_status()
+                self.notify_expiry()
+                self.notify_pin_expiry()
+
+            elif choice == 'show_ssh_key':
+                self.show_ssh_key()
+                self.notify_expiry()
+                self.notify_pin_expiry()
+
+            elif choice == 'show_passwd_strength':
+                self.show_passwd_strength()
                 self.notify_expiry()
                 self.notify_pin_expiry()
 
@@ -1173,7 +1439,15 @@ class PasswordManager:
                     else:
                         pass
                     if os.path.exists(self.API):
-                        os.remove(seld.API)
+                        os.remove(self.API)
+                    else:
+                        pass
+                    if os.path.exists(self.RSA):
+                        os.remove(self.RSA)
+                    else:
+                        pass
+                    if os.path.exists(self.SSH):
+                        os.remove(self.SSH)
                     else:
                         pass
                     os.remove(self.USER_DATA_FILE)
@@ -1192,23 +1466,25 @@ class PasswordManager:
                             break
                     else:
                         print(colored("[-] Abort.", "red"))
+                        break
                 else:
                     print(colored("[-] Abort.", "red"))
+                    break
 
             elif choice == 'add_api_key':
                 platform = input(colored("[*] Platform: ", "yellow"))
-                if not platform.startswith('http://') and not platform.startswith('https://'):
-                    print(colored("[-] Provide a platform in URL form please.", "red"))
+                if not validator.url(website):
+                    print(colored("[-] The Platform you've entered is Invalid! Please make sure that it's in URL form.", "red"))
                     continue
-                key_name = input(colored("[*] API Key Name: ", "yellow"))
-                if not key_name:
-                    print(colored("[-] No key name provided! QUITTING!", "red"))
+                username = input(colored("[*] Username: " , "yellow"))
+                if not username:
+                    print(colored("[-] No username provided! QUITTING!", "red"))
                     continue
                 key = getpass.getpass(colored("[*] API Key: ", "yellow"))
                 if not key:
                     print(colored("[-] No key provided! QUITTING!", "red"))
                     continue
-                self.add_key(platform, key_name, key)
+                self.add_key(platform, username, key)
                 self.notify_expiry()
                 self.notify_pin_expiry()
 
@@ -1246,25 +1522,34 @@ class PasswordManager:
                     else:
                         print(colored("[-] Invalid Account Number! Account Numbers should be 16-digits", "red"))
                 except ValueError:
-                    print(colored("[-] No Account Number provided.", "red"))
+                    print(colored("[-] No Account Number provided. QUTTING!", "red"))
                     continue
 
             elif choice == 'get_api_key':
                 platform= input(colored("[*] Platform: ", "yellow"))
-                key_name = input(colored("[*] API Key Name: ", "yellow"))
+                if not platform:
+                    print(colored("[-] No platform provided! QUITTING!", "red"))
+                    continue
+                username = input(colored("[*] Username: ", "yellow"))
+                if not username:
+                    print(colored("[-] No username provided! QUITTING!", "red"))
+                    continue
 
-                decrypted_key = self.get_key(platform, key_name)
+                decrypted_key = self.get_key(platform, username)
 
                 if decrypted_key is not None:
                     print(colored(f"[+] API Key: {decrypted_key}", "green"))
                 else:
-                    print(colored("[-] API Key not found!", "red"))
+                    print(colored("[-] API Key not found. QUITTING!", "red"))
 
             elif choice == 'get_card_pin':
                 card_type = input(colored("[*] Card Type: ", "yellow")).lower()
+                if card_type != 'debit' and card_type != 'credit':                                          
+                    print(colored("[-] Please specify if Debit or Credit.", "red"))                         
+                    continue
                 card_number = input(colored("[*] Card Number: ", "yellow"))
-                if card_type != 'debit' and card_type != 'credit':
-                    print(colored("[-] Please specify if Debit or Credit.", "red"))
+                if not card_number:
+                    print(colored("[-] No card number provided! QUITTING!", "red"))
                     continue
 
                 decrypted_pin = self.get_card_pin(card_type, card_number)
@@ -1274,16 +1559,16 @@ class PasswordManager:
                         data = json.load(file)
 
                     if card_type not in [entry['card_type'] for entry in data]:
-                        print(colored("[-] This card type is not available in your vault.", "red"))
+                        print(colored(f"f[-] This card type {card_type} is not available in your vault.", "red"))
                     elif card_number not in [entry['card_number'] for entry in data]:
-                        print(colored("[-] This card number doesn't exist for that card type.", "red"))
+                        print(colored(f"[-] This card number {card_number} doesn't exist for that card type.", "red"))
                     else:
                         for entry in data:
                             if entry['card_type'] == card_type and entry['card_number'] == card_number:
                                 expiry_date = datetime.strptime(entry['expiry_at'], "%Y-%m-%d %H:%M:%S") if 'expiry_at' in entry else None
 
                                 if expiry_date and datetime.now() > expiry_date:
-                                    response = input(colored("[*] Card PIN has expired. Do you want to update the PIN or delete the card details? (u/d): ", "yellow")).lower()
+                                    response = input(colored("[*] Card PIN has expired. Do you want to update the PIN or delete the card details? (U/D): ", "yellow")).lower()
                                     if response == 'u':
                                         new_pin = getpass.getpass(colored("[*] New Card PIN: ", "yellow"))
                                         re_enter = getpass.getpass(colored("[*] Re-Enter New Card PIN: ", "yellow"))
@@ -1319,22 +1604,28 @@ class PasswordManager:
                                             with open(self.CARD_PIN_FILE, 'w') as file:
                                                 json.dump(data, file, indent=4)
 
-                                            print(colored("[-] Card details permanently deleted.", "red"))
+                                            print(colored("[+] Card details permanently deleted.", "green"))
                                         continue
 
                                 else:
                                     if decrypted_pin is not None:
                                         print(colored(f"[+] Card PIN: {decrypted_pin}", "green"))
                                     else:
-                                        print(colored("[-] Card PIN not found! Did you save the Card PIN?", "red"))
+                                        print(colored("[-] Card PIN not found. QUITTING!", "red"))
 
                 except FileNotFoundError:
-                    print(colored("[-] No card details have been saved yet!", "red"))
+                    print(colored("[-] No card details have been saved. ", "red"))
 
             elif choice == 'ch_api_key':
                 platform = input(colored("[*] Platform: ", "yellow"))
-                key_name = input(colored("[*] API Key Name: ", "yellow"))
-                self.change_key(platform, key_name)
+                if not platform:
+                    print(colored("[-] No platform provided. QUITTING!", "red"))
+                    continue
+                username = input(colored("[*] API Key Name: ", "yellow"))
+                if not username:
+                    print(colored("[-] No username provided. QUITTING!", "red"))
+                    continue
+                self.change_key(platform, username)
 
             elif choice == 'lout':
                 self.logout()
@@ -1345,21 +1636,27 @@ class PasswordManager:
 'add_platform_passwd' - Add a new password for the desired platform
 'add_api_key' - Add new API Key
 'add_card_pin' - Add a new PIN for the desired card number
+'add_ssh_key' - Add a new SSH Key for the the desired username and key name
 'get_platform_passwd' - Display the plaintext version of the password for the desired platform
 'get_api_key' - Display the plaintext version of the key
 'get_card_pin' - Display the plaintext version of the PIN for the desired card number
+'get_ssh_key' - Display the plaintext version of the SSH Key for the desired username and key name
 'del_platform_passwd' - Delete a saved password according to your desired Platform
-'del_api_key' - Delete key according to your desired Username and Key Name
+'del_api_key' - Delete key according to your desired Platform and Username
 'del_card_pin' - Delete a saved PIN according to your desired Card Number
+'del_ssh_key' - Delete a saved SSH Key according to your desired Username
 'ch_platform_pass' - Change the password for the desired platform
 'ch_card_pin' - Change the password for the desired platform
-'ch_api_key' - Change the API Key for the desired platform and API Key name
+'ch_api_key' - Change the API Key for the desired platform and Username
+'ch_ssh_key' - Chabge the SSH Key for the desired username and Key Name
 'enable2fa' - Enable Two-Factor Authentication for added security
 'genpasswd' - Generate a strong password
 'changemaster' - Change the masterkey
 'show_passwd_exp' - List all usernames and their status on a specific platform or all
 'show_pin_exp' - List all card numbers and their status on a specific card type or all
 'show_api_key' - List all API Key name and their date when they were added (No Expiry when it comes to API Keys)
+'show_ssh_key' - List all SSH Key name and their date when they were added (No Expiry when it comes to SSH Keys also)
+'show_passwd_strength' - List the strength of the password of a username on a specific platform.
 'lout' - Logout
 'exit' - Terminate MIRA
 'reset' - Delete all data, including the user account permanently (Be cautious with this command! It can result in permanent data loss!)
@@ -1377,10 +1674,17 @@ Enable Two-Factor Authentication for an additional layer of security.
                 exit()
 
             elif choice == 'clear':
-                self.clear_terminal()
+                clear_terminal()
+
+            elif choice == 'about':
+                clear_terminal()
+                print(colored(wolf, "blue"))
+                print(colored(about, "cyan"))
 
             else:
                 print(colored("[-] Invalid Option", "red"))
+
+
 
     def check_username_reuse(self, new_website, new_username, existing_data):
         """
@@ -1390,6 +1694,13 @@ Enable Two-Factor Authentication for an additional layer of security.
             existing_website = entry['website']
             existing_username = entry['username']
             if existing_website == new_website and existing_username == new_username:
+                return True
+        return False
+
+    def check_email_reuse(self, new_email, existing_data):
+        for entry in existing_data:
+            decrypted_email = self.decrypted_information(entry['email_address'])
+            if decrypted_email == new_email:
                 return True
         return False
 
@@ -1403,7 +1714,7 @@ Enable Two-Factor Authentication for an additional layer of security.
                 return True
         return False
 
-    def add_password(self, website, username, password):
+    def add_password(self, website, username, email_address, password):
         """
         Adds a new password entry for a given website and username. Checks for valid URL form and whether the username or password has been used before. Encrypts the password, checks its strength, and saves the new entry to the PASSFILE.
         """
@@ -1426,6 +1737,10 @@ Enable Two-Factor Authentication for an additional layer of security.
             print(colored(f"[-] The username {username} already exists for this platform!", "red"))
             return
 
+        if self.check_email_reuse(email_address):
+            print(colored(f"[-] The email {email_address} has been used to other platforms. Avoud using the same email address on other platforms!!", "red"))
+            return
+
         if self.check_password_reuse(password, data):
             print(colored("[-] Password has been used to other platforms. (Password not added) Avoid using the same password on other platforms!!", "red"))
             return
@@ -1433,9 +1748,11 @@ Enable Two-Factor Authentication for an additional layer of security.
         salt = token_bytes(16)
         if self.check_password_strength(password):
             encrypted_password = self.encrypt_password(password)
+            encrypted_email = self.encrypt_information(email_address)
             current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             password_entry = {
                 'website': website,
+                'email_address': encrypted_email,
                 'username': username,
                 'password': encrypted_password,
                 'added_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -1449,7 +1766,7 @@ Enable Two-Factor Authentication for an additional layer of security.
         else:
             print(colored("[-] Password not added. Please choose a stronger password.", "red"))
 
-    def get_password(self, website, username):
+    def get_password(self, website, email_address, username):
         """
         Retrieves the decrypted password for a given website and username. Checks for the existence of the PASSFILE, loads data, and decrypts the password if the entry matches.Handles JSONDecodeError and expiry date verification. Returns the decrypted password or None if not found or expired.
         """
@@ -1463,7 +1780,7 @@ Enable Two-Factor Authentication for an additional layer of security.
             data = []
 
         for entry in data:
-            if entry['website'] == website and entry['username'] == username:
+            if entry['website'] == website and entry['email_address'] == email_address and entry['username'] == username:
                 if 'expiry_at' in entry and entry['expiry_at']:
                     expiry_date = datetime.strptime(entry['expiry_at'], "%Y-%m-%d %H:%M:%S")
                     if datetime.now() > expiry_date:
@@ -1479,8 +1796,12 @@ Enable Two-Factor Authentication for an additional layer of security.
         Allows the user to delete a password entry for a given platform (website) and username. Prompts for platform URL, username, and current master password for verification. Verifies the master password, loads data from PASSFILE, deletes the matching entry, and updates the file. Handles incorrect master password, non-existent passwords, and deletion failure scenarios.
         """
         website = input(colored("[*] Platform: ", "yellow"))
-        if not website.startswith('http://') and not website.startswith('https://'):
-            print(colored("[-] Provide a platform in URL form please.", "red"))
+        if not validators.url(website):
+            print(colored("[-] The Platform you've entered is Invalid! Please make sure that it's in URL form.", "red"))
+            return
+        email_address = input(colored("[*] Email Address: ", "yellow"))
+        if not validators.email(email_address):
+            print(colored("[-] The email you've entered is Invalid!", "red"))
             return
         username = input(colored("[*] Username: ", "yellow"))
         master_pass = getpass.getpass(colored("[*] Master Password: ", "yellow"))
@@ -1508,7 +1829,7 @@ Enable Two-Factor Authentication for an additional layer of security.
             data = []
 
         for entry in data:
-            if entry['website'] == website and entry['username'] == username:
+            if entry['website'] == website and entry['email_address'] == email_address and entry['username'] == username:
                 data.remove(entry)
                 with open(self.PASSFILE, 'w') as file:
                     json.dump(data, file, indent=4)
@@ -1517,7 +1838,7 @@ Enable Two-Factor Authentication for an additional layer of security.
 
         print(colored("[-] Password not found! Deletion failed!", "red"))
 
-    def change_password(self, website, username):
+    def change_password(self, website, email_address, username):
         """
         Allows the user to change the password for a given platform (website) and username. It prompts for the current password, verifies it, and then prompts for a new password. It encrypts and updates the password entry in the PASSFILE. Handles scenarios like incorrect current password, non-existent passwords, and password strength requirements.
         """
@@ -1992,6 +2313,263 @@ Enable Two-Factor Authentication for an additional layer of security.
         else:
             print(colored("[-] Incorrect current API Key. Change Key failed!", "red"))
 
+    def check_ssh_keyname_reuse(self, new_username, new_key_name, existing_data):
+        """
+        Checks if a new SSH key's platform and key name combo is already in use in existing_data.
+        """                                                                                                                   
+        for entry in existing_data:
+            existing_username = entry['username']
+            existing_key_name = entry['key_name']
+            if existing_username == new_username and existing_key_name == new_key_name:
+                return True
+        return False
+
+    def check_ssh_key_reuse(self, public_key, private_key, existing_data):
+        """
+        Checks if a new SSH key is already in use in existing_data.
+        """
+        for entry in existing_data:
+            decrypted_pub_key = self.decrypt_information(entry['public_key'])
+            decrypted_priv_key = self.decrypt_information(entry['private_key'])
+            if decrypted_pub_key == public_key and decrypted_priv_key == private_key:
+                return True                                                                                          
+
+        return False
+
+    def add_ssh_key(self, username, key_name, private_key, public_key, passphrase=None):
+        """
+        Adds a new SSH key entry with the specified username, key name, and key to the SSH file.
+        """
+        if not os.path.exists(self.SSH):
+            data = []
+        else:
+            try:
+                with open(self.SSH, 'r') as file:
+                    data = json.load(file)
+            except json.JSONDecodeError:
+                data = []
+            except FileNotFoundError:
+                pass
+
+        if self.check_ssh_keyname_reuse(username, key_name, data):
+            print(colored(f"[-] The key name {key_name} already exists for this username!", "red"))
+            return
+
+        if self.check_ssh_key_reuse(public_key, private_key, data):
+            print(colored("[-] The key has been used to other Key Name. (Both Key not added) Avoid using the same Key on other Key Name!!", "red"))
+            return
+
+        ssh_key_entry = {
+            'username': username,
+            'key_name': key_name,
+            'public_key': self.encrypt_information(public_key),
+            'private_key': self.encrypt_information(private_key),
+            'passphrase': self.encrypt_information(passphrase) if passphrase else 'null',
+            'added_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+
+        data.append(ssh_key_entry)
+        with open(self.SSH, 'w') as file:
+            json.dump(data, file, indent=4)
+
+        print(colored("[+] SSH Key added!", "green"))
+
+    def get_private_ssh_key(self, username, key_name):
+        if not os.path.exists(self.SSH):
+            return None
+
+        try:
+            with open(self.SSH, 'r') as file:
+                data = json.load(file)
+        except json.JSONDecodeError:
+            return None
+
+        for entry in data:
+            if entry['username'] == username and entry['key_name'] == key_name:
+                decrypted_priv_key = self.decrypt_information(entry['private_key'])
+                return decrypted_priv_key
+
+        return None
+
+    def get_public_ssh_key(self, username, key_name):
+        if not os.path.exists(self.SSH):
+            return None
+
+        try:
+            with open(self.SSH, 'r') as file:
+                data = json.load(file)
+        except json.JSONDecodeError:
+            return None
+
+        for entry in data:
+            if entry['username'] == username and entry['key_name'] == key_name:
+                decrypted_pub_key = self.decrypt_information(entry['public_key'])
+                return decrypted_pub_key
+
+        return None
+
+    def get_passphrase_private_ssh_key(self, username, key_name):
+        if not os.path.exists(self.SSH):
+            return None
+
+        try:
+            with open(self.SSH, 'r') as file:
+                data = json.load(file)
+        except json.JSONDecodeError:
+            return None
+
+        for entry in data:
+            if entry['username'] == username and entry['key_name'] == key_name:
+                encrypted_passphrase = entry['passphrase']
+                if encrypted_passphrase.lower() == 'null':
+                    return colored("null", "red")
+                else:
+                    passphrase = self.decrypt_information(encrypted_passphrase)
+                    return passphrase.lower() if passphrase else None
+
+        return None
+
+    def delete_ssh_key(self):
+        username = input(colored("[*] Username: ", "yellow"))
+        key_name = input(colored("[*] Key Name: ", "yellow"))
+        master_pass = getpass.getpass(colored("[*] Master Password: ", "yellow"))
+
+        if not os.path.exists(self.SSH):
+            print(colored("[-] No SSH Keys saved. Deletion failed", "red"))
+            return
+
+        with open(self.USER_DATA_FILE, 'r') as file:
+            user_data = json.load(file)
+
+        stored_master_password = user_data['master_password']
+        salt = user_data['salt']
+
+        try:
+            self.ph.verify(stored_master_password, master_pass + salt)
+        except VerifyMismatchError:
+            print(colored("[-] Incorrect current master password. Deletion failed!", "red"))
+            return
+
+        try:
+            with open(self.SSH, 'r') as file:
+                data = json.load(file)
+        except json.JSONDecodeError:
+            data = []
+                                                                                                
+        for entry in data:                                                                          
+            if entry['username'] == username and entry['key_name'] == key_name:
+                data.remove(entry)
+                with open(self.SSH, 'w') as file:
+                    json.dump(data, file, indent=4)
+                print(colored("[+] SSH Key successfully deleted!", "green"))
+                return
+
+        print(colored("[-] SSH Key not found! Deletion failed!", "red"))
+
+    def change_ssh_key(self, username, key_name):
+        data = []
+    
+        if not os.path.exists(self.SSH):
+            print(colored("[-] No SSH Keys saved!", "red"))
+            return
+
+        try:
+            with open(self.SSH, 'r') as file:
+                data = json.load(file)
+        except json.JSONDecodeError:
+            pass
+
+        for entry in data:
+            if username not in [entry['username'] for entry in data]:
+                print(colored(f"[-] This username {username} is not available on your SSH Key vault.", "red"))
+                return
+            elif key_name not in [entry['key_name'] for entry in data]:
+                print(colored(f"[-] This key name {key_name} doesn't exist for that username.", "red"))
+                return
+
+        # Ask for passphrase verification if it's not 'null'
+        for entry in data:
+            if entry['passphrase'] == 'null':
+                pass
+            else:
+                current_passphrase = getpass.getpass(colored("[*] Current Passphrase for verification: ", "yellow"))
+                decrypted_passphrase = self.decrypt_information(entry['passphrase'])
+                if current_passphrase != decrypted_passphrase:
+                    print(colored("[-] Incorrect current passphrase!", "red"))
+                    return
+
+        try:
+            print(colored("[*] Enter the New Private Key (press Ctrl+D on a new line to finish):", "yellow"))
+            new_private_key_lines = []
+            try:
+                while True:
+                    line = input()
+                    new_private_key_lines.append(line)
+            except EOFError:
+                pass
+
+            print(colored("[*] Enter the New Public Key (press Ctrl+D on a new line to finish):", "yellow"))
+            new_public_key_lines = []
+            try:
+                while True:
+                    line = input()
+                    new_public_key_lines.append(line)
+            except EOFError:
+                pass
+        except SSHException:
+            print(colored("[-] Invalid OpenSSH private key", "red"))
+
+        new_private_key = '\n'.join(new_private_key_lines)
+        new_public_key = '\n'.join(new_public_key_lines)
+
+        is_password_protected = False
+        passphrase = None
+
+        try:
+            new_key = paramiko.RSAKey(file_obj=io.StringIO(new_private_key))
+            for entry in data:
+                if entry['username'] == username and entry['key_name'] == key_name:
+                    entry['private_key'] = self.encrypt_information(new_private_key)
+                    entry['public_key'] = self.encrypt_information(new_public_key)
+                    entry['passphrase'] = 'null'
+
+            with open(self.SSH, 'w') as file:
+                json.dump(data, file, indent=4)
+
+            print(colored("[+] SSH Key updated successfully!", "green"))
+        except paramiko.ssh_exception.SSHException:                                                              
+            print(colored("[-] Error: Invalid Private Key!", "red"))
+        except paramiko.ssh_exception.PasswordRequiredException:
+            is_password_protected = True
+
+            try:
+                if is_password_protected:
+                    print(colored("[*] The new private key is Password-Protected!", "magenta"))
+                    new_passphrase = getpass.getpass(colored("[*] Enter the new private key passphrase: ", "yellow"))
+                    re_enter = getpass.getpass(colored("[*] Re-Enter new private key passphrase: ", "yellow"))
+                    if re_enter != new_passphrase:
+                        print(colored("[-] New Password did not match. QUITTING!"))
+                        return
+                    new_key = paramiko.RSAKey(file_obj=io.StringIO(new_private_key), password=new_passphrase)
+                else:
+                    new_key = paramiko.RSAKey(file_obj=io.StringIO(new_private_key))
+            except Exception as e:
+                print(colored(f"[-] Error: {e}", "red"))
+            except paramiko.ssh_exception.SSHException:                                                              
+                print(colored("[-] Error: Invalid Private Key!", "red"))
+            else:
+                for entry in data:
+                    if entry['username'] == username and entry['key_name'] == key_name:
+                            
+                        entry['private_key'] = self.encrypt_information(new_private_key)
+                        entry['public_key'] = self.encrypt_information(new_public_key)
+                        entry['passphrase'] = self.encrypt_information(new_passphrase)
+
+                with open(self.SSH, 'w') as file:
+                    json.dump(data, file, indent=4)
+
+                print(colored("[+] SSH Key updated successfully!", "green"))
+        
     def encrypt_information(self, information):
         return self.cipher.encrypt(information.encode()).decode()
 
@@ -2019,9 +2597,9 @@ if __name__ == '__main__':
                 time.sleep(2)                                                                                                         
                 print(colored(current_datetime_info, "blue"))                                                                         
                 time.sleep(2)
-                print(colored("[+] Starting Mira Password Manager.....", "blue"))
+                loading_animation(20)
                 password_manager = PasswordManager()
-                time.sleep(20)
+                time.sleep(1)
                 if password_manager.lockout_time and time.time() < password_manager.lockout_time:                                         
                     clear_terminal()
                     print(colored(blehhh, "red"))
@@ -2200,7 +2778,7 @@ if __name__ == '__main__':
 
                     elif choice == 'about':
                         clear_terminal()
-                        print(colored(wolf, "cyan"))
+                        print(colored(wolf, "blue"))
                         print(colored(about, "cyan"))
 
                     elif choice == 'clear':
