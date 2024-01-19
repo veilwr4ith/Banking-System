@@ -1766,9 +1766,9 @@ Enable Two-Factor Authentication for an additional layer of security.
         else:
             print(colored("[-] Password not added. Please choose a stronger password.", "red"))
 
-    def get_password(self, website, email_address, username):
+    def get_password(self, website, entered_email, username):
         """
-        Retrieves the decrypted password for a given website and username. Checks for the existence of the PASSFILE, loads data, and decrypts the password if the entry matches.Handles JSONDecodeError and expiry date verification. Returns the decrypted password or None if not found or expired.
+        Retrieves the decrypted password for a given website and username. Checks for the existence of the PASSFILE, loads data, and decrypts the password if the entry matches. Handles JSONDecodeError and expiry date verification. Returns the decrypted password or None if not found or expired.
         """
         if not os.path.exists(self.PASSFILE):
             return None
@@ -1780,14 +1780,18 @@ Enable Two-Factor Authentication for an additional layer of security.
             data = []
 
         for entry in data:
-            if entry['website'] == website and entry['email_address'] == email_address and entry['username'] == username:
-                if 'expiry_at' in entry and entry['expiry_at']:
-                    expiry_date = datetime.strptime(entry['expiry_at'], "%Y-%m-%d %H:%M:%S")
-                    if datetime.now() > expiry_date:
-                        return None
+            if entry['website'] == website and entry.get('email_address'):  # Check if email_address exists in the entry
+                decrypted_email = self.decrypt_information(entry['email_address'])
+            
+                # Compare the decrypted email to the entered email
+                if decrypted_email == entered_email and entry['username'] == username:
+                    if 'expiry_at' in entry and entry['expiry_at']:
+                        expiry_date = datetime.strptime(entry['expiry_at'], "%Y-%m-%d %H:%M:%S")
+                        if datetime.now() > expiry_date:
+                            return None
 
-                decrypted_password = self.decrypt_password(entry['password'])
-                return decrypted_password
+                    decrypted_password = self.decrypt_password(entry['password'])
+                    return decrypted_password
 
         return None
 
